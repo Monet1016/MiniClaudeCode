@@ -235,6 +235,86 @@ class AgentLoopSplitTests(unittest.TestCase):
 
         self.assertEqual(printed, ["new"])
 
+    def test_agent_loop_injects_todo_reminder_after_three_tool_rounds(self):
+        module = load_module("mini_claude_agent_loop_todo", AGENT_LOOP_PATH)
+        module.rounds_since_todo = 3
+
+        final_response = SimpleNamespace(
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text="done")],
+        )
+
+        printed = []
+        deps = self._make_deps(module, [final_response], printed)
+        messages = [{"role": "user", "content": "ping"}]
+
+        module.agent_loop(messages, {}, deps)
+
+        reminder_messages = [
+            msg for msg in messages
+            if msg.get("role") == "user"
+            and msg.get("content") == "<reminder>Update your todos.</reminder>"
+        ]
+        self.assertEqual(len(reminder_messages), 1)
+        self.assertEqual(module.rounds_since_todo, 0)
+
+    def test_cron_autorun_loop_runs_one_scheduled_turn(self):
+        module = load_module("mini_claude_agent_loop_cron", AGENT_LOOP_PATH)
+        printed = []
+        history = []
+        context = {}
+
+        class StopLoop(Exception):
+            pass
+
+        queue_state = {"count": 0}
+
+        def consume_cron_queue():
+            if queue_state["count"] == 0:
+                queue_state["count"] += 1
+                return [SimpleNamespace(prompt="nightly job")]
+            raise StopLoop()
+
+        deps = self._make_deps(module, [], printed)
+        deps = module.AgentLoopDeps(
+            client=deps.client,
+            assemble_system_prompt=deps.assemble_system_prompt,
+            assemble_tool_pool=deps.assemble_tool_pool,
+            update_context=lambda current, messages: {"updated": True},
+            compact_history=deps.compact_history,
+            reactive_compact=deps.reactive_compact,
+            consume_cron_queue=consume_cron_queue,
+            tool_result_budget=deps.tool_result_budget,
+            snip_compact=deps.snip_compact,
+            micro_compact=deps.micro_compact,
+            estimate_size=deps.estimate_size,
+            trigger_hooks=deps.trigger_hooks,
+            terminal_print=printed.append,
+            has_tool_use=deps.has_tool_use,
+            call_tool_handler=deps.call_tool_handler,
+            context_limit=deps.context_limit,
+            primary_model=deps.primary_model,
+            fallback_model=deps.fallback_model,
+        )
+
+        original_sleep = module.time.sleep
+        original_agent_loop = module.agent_loop
+        try:
+            module.time.sleep = lambda _: None
+            module.agent_loop = lambda messages, current_context, injected_deps: messages.append(
+                {"role": "assistant", "content": [SimpleNamespace(type="text", text="cron done")]}
+            )
+
+            with self.assertRaises(StopLoop):
+                module.cron_autorun_loop(history, context, deps)
+        finally:
+            module.time.sleep = original_sleep
+            module.agent_loop = original_agent_loop
+
+        self.assertEqual(history[0]["content"], "[Scheduled] nightly job")
+        self.assertEqual(history[1]["role"], "assistant")
+        self.assertTrue(any("cron done" in text for text in printed))
+
     def test_main_source_moves_loop_definitions_out_of_main(self):
         function_names = top_level_function_names(MAIN_PATH)
 
