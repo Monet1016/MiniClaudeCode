@@ -6,6 +6,12 @@ __pycache__/
 *.pyc
 *.pyo
 
+# 测试
+tests/
+
+# 文档
+docs/
+
 # IDE
 .vscode/
 .idea/
