@@ -6,6 +6,8 @@ import threading
 import time
 from typing import Any, Callable
 
+from tooling import ToolContext
+
 DEFAULT_MAX_TOKENS = 8000
 ESCALATED_MAX_TOKENS = 16000
 MAX_RETRIES = 3
@@ -19,7 +21,7 @@ CONTINUATION_PROMPT = "Continue from the previous response. Do not repeat comple
 class AgentLoopDeps:
     client: Any
     assemble_system_prompt: Callable[[dict], str]
-    assemble_tool_pool: Callable[[], tuple[list[dict], dict]]
+    assemble_tool_pool: Callable[[], tuple[list[dict], Any]]
     update_context: Callable[[dict, list], dict]
     compact_history: Callable[[list], list]
     reactive_compact: Callable[[list], list]
@@ -31,7 +33,7 @@ class AgentLoopDeps:
     trigger_hooks: Callable[..., Any]
     terminal_print: Callable[[str], None]
     has_tool_use: Callable[[Any], bool]
-    call_tool_handler: Callable[[Any, dict, str], Any]
+    workspace_root: str
     context_limit: int
     primary_model: str
     fallback_model: str | None
@@ -144,23 +146,22 @@ def should_run_background(tool_name: str, tool_input: dict) -> bool:
     )
 
 
-def start_background_task(block: Any, handlers: dict, deps: AgentLoopDeps) -> str:
+def start_background_task(block: Any, registry: Any, deps: AgentLoopDeps) -> str:
     global _bg_counter
     _bg_counter += 1
     bg_id = f"bg_{_bg_counter:04d}"
     command = _block_value(block, "input", {}).get("command", _block_value(block, "name"))
 
     def worker() -> None:
-        handler = handlers.get(_block_value(block, "name"))
-        result = deps.call_tool_handler(
-            handler,
-            _block_value(block, "input", {}),
+        result = registry.execute(
             _block_value(block, "name"),
+            _block_value(block, "input", {}),
+            ToolContext(cwd=deps.workspace_root),
         )
         deps.trigger_hooks("PostToolUse", block, result)
         with background_lock:
             background_tasks[bg_id]["status"] = "completed"
-            background_results[bg_id] = str(result)
+            background_results[bg_id] = str(result.output)
 
     with background_lock:
         background_tasks[bg_id] = {
@@ -207,11 +208,7 @@ def prepare_context(messages: list, deps: AgentLoopDeps) -> list:
 
 
 def build_user_content(results: list[dict]) -> list[dict]:
-    content = []
-    for note in collect_background_results():
-        content.append({"type": "text", "text": note})
-    content.extend(results)
-    return content
+    return list(results)
 
 
 def inject_background_notifications(messages: list) -> None:
@@ -250,7 +247,7 @@ def call_llm(
 
 def agent_loop(messages: list, context: dict, deps: AgentLoopDeps) -> None:
     global rounds_since_todo
-    tools, handlers = deps.assemble_tool_pool()
+    tools, registry = deps.assemble_tool_pool()
     state = RecoveryState(deps.primary_model)
     max_tokens = DEFAULT_MAX_TOKENS
 
@@ -276,7 +273,7 @@ def agent_loop(messages: list, context: dict, deps: AgentLoopDeps) -> None:
 
         prepare_context(messages, deps)
         context = deps.update_context(context, messages)
-        tools, handlers = deps.assemble_tool_pool()
+        tools, registry = deps.assemble_tool_pool()
 
         try:
             response = call_llm(messages, context, tools, state, max_tokens, deps)
@@ -355,7 +352,7 @@ def agent_loop(messages: list, context: dict, deps: AgentLoopDeps) -> None:
                 _block_value(block, "name"),
                 _block_value(block, "input", {}),
             ):
-                bg_id = start_background_task(block, handlers, deps)
+                bg_id = start_background_task(block, registry, deps)
                 output = (
                     f"[Background task {bg_id} started] "
                     "Result will arrive as a task_notification."
@@ -369,13 +366,13 @@ def agent_loop(messages: list, context: dict, deps: AgentLoopDeps) -> None:
                 )
                 continue
 
-            handler = handlers.get(_block_value(block, "name"))
-            output = deps.call_tool_handler(
-                handler,
-                _block_value(block, "input", {}),
+            tool_result = registry.execute(
                 _block_value(block, "name"),
+                _block_value(block, "input", {}),
+                ToolContext(cwd=deps.workspace_root),
             )
-            deps.trigger_hooks("PostToolUse", block, output)
+            output = tool_result.output
+            deps.trigger_hooks("PostToolUse", block, tool_result)
             deps.terminal_print(str(output)[:300])
 
             if _block_value(block, "name") == "todo_write":

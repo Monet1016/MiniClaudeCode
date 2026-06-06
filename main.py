@@ -32,6 +32,12 @@ from agent_loop import (
     cron_autorun_loop,
     print_turn_assistants,
 )
+from tooling import ToolContext, ToolRegistry
+from tools import (
+    create_builtin_tool_registry,
+    make_handler_tool,
+    serialize_tools_for_llm,
+)
 
 load_dotenv(override=True)
 if os.getenv("ANTHROPIC_BASE_URL"):
@@ -448,15 +454,6 @@ def run_glob(pattern: str, cwd: Path = None) -> str:
         return f"Error: {e}"
 
 
-def call_tool_handler(handler, args: dict, name: str) -> str:
-    if not handler:
-        return f"Unknown: {name}"
-    try:
-        return handler(**(args or {}))
-    except TypeError as e:
-        return f"Error: {e}"
-
-
 def run_todo_write(todos: list) -> str:
     global CURRENT_TODOS
     for i, todo in enumerate(todos):
@@ -673,6 +670,84 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
             return result
 
         messages = [{"role": "user", "content": prompt}]
+        teammate_registry = ToolRegistry([
+            make_handler_tool(
+                name="bash",
+                description="Run a shell command.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+                handler=_run_bash,
+            ),
+            make_handler_tool(
+                name="read_file",
+                description="Read file.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "limit": {"type": "integer"},
+                        "offset": {"type": "integer"},
+                    },
+                    "required": ["path"],
+                },
+                handler=_run_read,
+            ),
+            make_handler_tool(
+                name="write_file",
+                description="Write file.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                },
+                handler=_run_write,
+            ),
+            make_handler_tool(
+                name="send_message",
+                description="Send message to another agent.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "to": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["to", "content"],
+                },
+                handler=lambda to, content: (BUS.send(name, to, content), "Sent")[1],
+            ),
+            make_handler_tool(
+                name="list_tasks",
+                description="List all tasks.",
+                input_schema={"type": "object", "properties": {}, "required": []},
+                handler=_run_list_tasks,
+            ),
+            make_handler_tool(
+                name="claim_task",
+                description="Claim a pending task.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"task_id": {"type": "string"}},
+                    "required": ["task_id"],
+                },
+                handler=_run_claim_task,
+            ),
+            make_handler_tool(
+                name="complete_task",
+                description="Mark an in-progress task as completed.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"task_id": {"type": "string"}},
+                    "required": ["task_id"],
+                },
+                handler=_run_complete_task,
+            ),
+        ])
         sub_tools = [
             {"name": "bash", "description": "Run a shell command.",
              "input_schema": {"type": "object",
@@ -715,16 +790,6 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                               "properties": {"task_id": {"type": "string"}},
                               "required": ["task_id"]}},
         ]
-
-        sub_handlers = {
-            "bash": _run_bash, "read_file": _run_read,
-            "write_file": _run_write,
-            "send_message": lambda to, content: (BUS.send(name, to, content),
-                                                  "Sent")[1],
-            "list_tasks": _run_list_tasks,
-            "claim_task": _run_claim_task,
-            "complete_task": _run_complete_task,
-        }
 
         while True:
             if len(messages) <= 3:
@@ -771,9 +836,12 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                             protocol_ctx["waiting_plan"] = (
                                 match.group(1) if match else output)
                         else:
-                            handler = sub_handlers.get(block.name)
-                            output = call_tool_handler(handler, block.input,
-                                                       block.name)
+                            tool_result = teammate_registry.execute(
+                                block.name,
+                                block.input,
+                                ToolContext(cwd=wt_ctx["path"] or str(WORKDIR)),
+                            )
+                            output = tool_result.output
                         results.append({"type": "tool_result",
                                         "tool_use_id": block.id,
                                         "content": str(output)})
@@ -950,42 +1018,6 @@ SUB_SYSTEM = (
 )
 
 
-SUB_TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object",
-                      "properties": {"command": {"type": "string"}},
-                      "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object",
-                      "properties": {"path": {"type": "string"},
-                                     "limit": {"type": "integer"},
-                                     "offset": {"type": "integer"}},
-                      "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to a file.",
-     "input_schema": {"type": "object",
-                      "properties": {"path": {"type": "string"},
-                                     "content": {"type": "string"}},
-                      "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in a file once.",
-     "input_schema": {"type": "object",
-                      "properties": {"path": {"type": "string"},
-                                     "old_text": {"type": "string"},
-                                     "new_text": {"type": "string"}},
-                      "required": ["path", "old_text", "new_text"]}},
-    {"name": "glob", "description": "Find files matching a glob pattern.",
-     "input_schema": {"type": "object",
-                      "properties": {"pattern": {"type": "string"}},
-                      "required": ["pattern"]}},
-]
-
-
-SUB_HANDLERS = {
-    "bash": run_bash, "read_file": run_read,
-    "write_file": run_write, "edit_file": run_edit,
-    "glob": run_glob,
-}
-
-
 def extract_text(content) -> str:
     if not isinstance(content, list):
         return str(content)
@@ -1002,12 +1034,18 @@ def has_tool_use(content) -> bool:
                for block in content)
 
 
+def create_subagent_tool_registry() -> ToolRegistry:
+    return create_builtin_tool_registry()
+
+
 def spawn_subagent(description: str) -> str:
+    registry = create_subagent_tool_registry()
+    sub_tools = serialize_tools_for_llm(registry)
     messages = [{"role": "user", "content": description}]
     for _ in range(30):
         response = client.messages.create(
             model=MODEL, system=SUB_SYSTEM, messages=messages,
-            tools=SUB_TOOLS, max_tokens=8000)
+            tools=sub_tools, max_tokens=8000)
         messages.append({"role": "assistant", "content": response.content})
         if not has_tool_use(response.content):
             break
@@ -1019,12 +1057,16 @@ def spawn_subagent(description: str) -> str:
             if blocked:
                 output = str(blocked)
             else:
-                handler = SUB_HANDLERS.get(block.name)
-                output = call_tool_handler(handler, block.input, block.name)
+                tool_result = registry.execute(
+                    block.name,
+                    block.input,
+                    ToolContext(cwd=str(WORKDIR)),
+                )
+                output = tool_result.output
                 trigger_hooks("PostToolUse", block, output)
             results.append({"type": "tool_result",
                             "tool_use_id": block.id,
-                            "content": str(output)})
+                            "content": output})
         messages.append({"role": "user", "content": results})
     for msg in reversed(messages):
         if msg["role"] == "assistant":
@@ -1456,23 +1498,48 @@ def connect_mcp(name: str) -> str:
             f"Discovered {len(mcp_client.tools)} tools: {', '.join(tool_names)}")
 
 
-def assemble_tool_pool() -> tuple[list[dict], dict]:
+def assemble_tool_pool() -> tuple[list[dict], object]:
     """Merge builtin tools + all MCP tools into one pool."""
-    tools = list(BUILTIN_TOOLS)
-    handlers = dict(BUILTIN_HANDLERS)
+    all_tools = create_builtin_tool_registry().list()
+    core_tool_names = {tool.name for tool in all_tools}
+
+    for tool_def in BUILTIN_TOOLS:
+        if tool_def["name"] in core_tool_names:
+            continue
+        handler = BUILTIN_HANDLERS.get(tool_def["name"])
+        if handler is None:
+            continue
+        all_tools.append(
+            make_handler_tool(
+                name=tool_def["name"],
+                description=tool_def.get("description", ""),
+                input_schema=tool_def.get("input_schema", {}),
+                handler=handler,
+            )
+        )
+
     for server_name, mcp_client in mcp_clients.items():
         safe_server = normalize_mcp_name(server_name)
         for tool_def in mcp_client.tools:
             safe_tool = normalize_mcp_name(tool_def["name"])
             prefixed = f"mcp__{safe_server}__{safe_tool}"
-            tools.append({
-                "name": prefixed,
-                "description": tool_def.get("description", ""),
-                "input_schema": tool_def.get("inputSchema", {}),
-            })
-            handlers[prefixed] = (
-                lambda *, c=mcp_client, t=tool_def["name"], **kw: c.call_tool(t, kw))
-    return tools, handlers
+            tool_name = tool_def["name"]
+
+            def call_mcp_tool(_tool_name=tool_name, _mcp_client=mcp_client, **kwargs):
+                return _mcp_client.call_tool(_tool_name, kwargs)
+
+            all_tools.append(
+                make_handler_tool(
+                    name=prefixed,
+                    description=tool_def.get("description", ""),
+                    input_schema=tool_def.get("inputSchema", {}),
+                    handler=call_mcp_tool,
+                )
+            )
+
+    registry = ToolRegistry(all_tools)
+    tools = serialize_tools_for_llm(registry)
+    return tools, registry
 
 
 # ── Lead Worktree Tools ──
@@ -1755,7 +1822,7 @@ def build_agent_loop_deps() -> AgentLoopDeps:
         trigger_hooks=trigger_hooks,
         terminal_print=terminal_print,
         has_tool_use=has_tool_use,
-        call_tool_handler=call_tool_handler,
+        workspace_root=str(WORKDIR),
         context_limit=CONTEXT_LIMIT,
         primary_model=PRIMARY_MODEL,
         fallback_model=FALLBACK_MODEL,
