@@ -22,6 +22,7 @@ class AgentLoopDeps:
     client: Any
     assemble_system_prompt: Callable[[dict], str]
     assemble_tool_pool: Callable[[], tuple[list[dict], Any]]
+    get_runtime: Callable[[], dict]
     update_context: Callable[[dict, list], dict]
     compact_history: Callable[[list], list]
     reactive_compact: Callable[[list], list]
@@ -61,6 +62,10 @@ def _block_value(block: Any, field: str, default: Any = None) -> Any:
     if isinstance(block, dict):
         return block.get(field, default)
     return getattr(block, field, default)
+
+
+def _tool_context(deps: AgentLoopDeps) -> ToolContext:
+    return ToolContext(cwd=deps.workspace_root, runtime=deps.get_runtime())
 
 
 def retry_delay(attempt: int) -> float:
@@ -156,7 +161,7 @@ def start_background_task(block: Any, registry: Any, deps: AgentLoopDeps) -> str
         result = registry.execute(
             _block_value(block, "name"),
             _block_value(block, "input", {}),
-            ToolContext(cwd=deps.workspace_root),
+            _tool_context(deps),
         )
         deps.trigger_hooks("PostToolUse", block, result)
         with background_lock:
@@ -369,7 +374,7 @@ def agent_loop(messages: list, context: dict, deps: AgentLoopDeps) -> None:
             tool_result = registry.execute(
                 _block_value(block, "name"),
                 _block_value(block, "input", {}),
-                ToolContext(cwd=deps.workspace_root),
+                _tool_context(deps),
             )
             output = tool_result.output
             deps.trigger_hooks("PostToolUse", block, tool_result)

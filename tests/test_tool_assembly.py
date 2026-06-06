@@ -108,12 +108,33 @@ class MainToolPoolAssemblyTests(unittest.TestCase):
             "patch_file",
             "todo_write",
             "task",
+            "create_task",
             "connect_mcp",
         ]:
             self.assertIn(expected, names)
 
         serialized_names = [tool["name"] for tool in tools_schema]
         self.assertLess(serialized_names.index("run_command"), serialized_names.index("bash"))
+
+    def test_assemble_tool_pool_prefers_registry_tool_when_name_collides(self):
+        main_module = load_main_module("mini_claude_main_registry_priority")
+
+        _, registry = main_module.assemble_tool_pool()
+        names = registry.list_all()
+
+        self.assertIn("run_command", names)
+        self.assertIn("todo_write", names)
+        self.assertIn("connect_mcp", names)
+        self.assertEqual(names.count("run_command"), 1)
+
+    def test_main_tool_pool_keeps_connect_mcp_in_main_layer(self):
+        main_module = load_main_module("mini_claude_main_connect_mcp_layer")
+
+        _, registry = main_module.assemble_tool_pool()
+
+        self.assertIsNotNone(registry.find("connect_mcp"))
+        self.assertIsNotNone(registry.find("task"))
+        self.assertIsNotNone(registry.find("create_task"))
 
     def test_create_subagent_tool_registry_exposes_phase1_core_tools(self):
         main_module = load_main_module("mini_claude_main_subagent_phase1")
