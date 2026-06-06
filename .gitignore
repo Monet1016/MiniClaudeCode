@@ -12,6 +12,10 @@ tests/
 # 文档
 docs/
 
+# 运行时数据
+.tasks/
+.mailboxes/
+
 # IDE
 .vscode/
 .idea/
