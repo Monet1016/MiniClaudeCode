@@ -32,9 +32,10 @@ from agent_loop import (
     cron_autorun_loop,
     print_turn_assistants,
 )
+from skills import list_skills as list_skill_records, load_skill as load_skill_record
 from tooling import ToolContext, ToolRegistry
 from tools import (
-    create_builtin_tool_registry,
+    create_builtin_tool_registry as build_core_tool_registry,
     make_handler_tool,
     serialize_tools_for_llm,
 )
@@ -49,7 +50,6 @@ MODEL = os.environ["MODEL_ID"]
 PRIMARY_MODEL = MODEL
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL_ID")
 
-SKILLS_DIR = WORKDIR / "skills"
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 TOOL_RESULTS_DIR = WORKDIR / ".task_outputs" / "tool-results"
 
@@ -289,69 +289,44 @@ def keep_worktree(name: str) -> str:
 
 # ── Skill Loading ──
 
-SKILL_REGISTRY: dict[str, dict] = {}
-
-
-def _parse_frontmatter(text: str) -> tuple[dict, str]:
-    if not text.startswith("---"):
-        return {}, text
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return {}, text
-    meta = {}
-    for line in parts[1].strip().splitlines():
-        if ":" in line:
-            key, value = line.split(":", 1)
-            meta[key.strip()] = value.strip().strip('"').strip("'")
-    return meta, parts[2].strip()
-
-
-def scan_skills():
-    SKILL_REGISTRY.clear()
-    if not SKILLS_DIR.exists():
-        return
-    for directory in sorted(SKILLS_DIR.iterdir()):
-        if not directory.is_dir():
-            continue
-        manifest = directory / "SKILL.md"
-        if not manifest.exists():
-            continue
-        raw = manifest.read_text()
-        meta, _ = _parse_frontmatter(raw)
-        name = meta.get("name", directory.name)
-        desc = meta.get("description", raw.split("\n")[0].lstrip("#").strip())
-        SKILL_REGISTRY[name] = {
-            "name": name,
-            "description": desc,
-            "content": raw,
-        }
-
-
-scan_skills()
-
-
 def list_skills() -> str:
-    if not SKILL_REGISTRY:
+    skill_records = list_skill_records(str(WORKDIR))
+    if not skill_records:
         return "(no skills found)"
     return "\n".join(
-        f"- {skill['name']}: {skill['description']}"
-        for skill in SKILL_REGISTRY.values())
+        f"- {skill.name}: {skill.description}"
+        for skill in skill_records
+    )
 
 
 def load_skill(name: str) -> str:
-    skill = SKILL_REGISTRY.get(name)
-    if not skill:
-        available = ", ".join(SKILL_REGISTRY.keys()) or "(none)"
+    skill = load_skill_record(str(WORKDIR), name)
+    if skill is None:
+        available = ", ".join(
+            skill_record.name for skill_record in list_skill_records(str(WORKDIR))
+        ) or "(none)"
         return f"Skill not found: {name}. Available: {available}"
-    return skill["content"]
+    return skill.content
+
+
+def create_builtin_tool_registry(cwd: str | None = None) -> ToolRegistry:
+    if cwd is None:
+        cwd = str(WORKDIR)
+    try:
+        return build_core_tool_registry(cwd)
+    except TypeError as error:
+        try:
+            return build_core_tool_registry()
+        except TypeError:
+            raise error
 
 
 # ── Prompt Assembly ──
 
 PROMPT_SECTIONS = {
     "identity": "You are a coding agent. Act, don't explain.",
-    "tools": "Available tools: bash, read_file, write_file, edit_file, glob, "
-             "todo_write, task, load_skill, compact, "
+    "tools": "Available tools: run_command, read_file, write_file, edit_file, list_files, grep_files, patch_file, load_skill, bash, glob, "
+             "todo_write, task, compact, "
              "create_task, list_tasks, get_task, claim_task, complete_task, "
              "schedule_cron, list_crons, cancel_cron, "
              "spawn_teammate, send_message, check_inbox, "
@@ -1035,7 +1010,7 @@ def has_tool_use(content) -> bool:
 
 
 def create_subagent_tool_registry() -> ToolRegistry:
-    return create_builtin_tool_registry()
+    return create_builtin_tool_registry(str(WORKDIR))
 
 
 def spawn_subagent(description: str) -> str:
@@ -1500,7 +1475,7 @@ def connect_mcp(name: str) -> str:
 
 def assemble_tool_pool() -> tuple[list[dict], object]:
     """Merge builtin tools + all MCP tools into one pool."""
-    all_tools = create_builtin_tool_registry().list()
+    all_tools = create_builtin_tool_registry(str(WORKDIR)).list()
     core_tool_names = {tool.name for tool in all_tools}
 
     for tool_def in BUILTIN_TOOLS:
@@ -1620,32 +1595,6 @@ def run_connect_mcp(name: str) -> str:
 # The model sees tool schemas; Python executes handlers. S20 keeps both tables
 # explicit so every added capability is visible in one place.
 BUILTIN_TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object",
-                      "properties": {"command": {"type": "string"},
-                                     "run_in_background": {"type": "boolean"}},
-                      "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object",
-                      "properties": {"path": {"type": "string"},
-                                     "limit": {"type": "integer"},
-                                     "offset": {"type": "integer"}},
-                      "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to a file.",
-     "input_schema": {"type": "object",
-                      "properties": {"path": {"type": "string"},
-                                     "content": {"type": "string"}},
-                      "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in a file once.",
-     "input_schema": {"type": "object",
-                      "properties": {"path": {"type": "string"},
-                                     "old_text": {"type": "string"},
-                                     "new_text": {"type": "string"}},
-                      "required": ["path", "old_text", "new_text"]}},
-    {"name": "glob", "description": "Find files matching a glob pattern.",
-     "input_schema": {"type": "object",
-                      "properties": {"pattern": {"type": "string"}},
-                      "required": ["pattern"]}},
     {"name": "todo_write",
      "description": "Create and manage a task list for the current session.",
      "input_schema": {"type": "object",
@@ -1662,11 +1611,6 @@ BUILTIN_TOOLS = [
      "input_schema": {"type": "object",
                       "properties": {"description": {"type": "string"}},
                       "required": ["description"]}},
-    {"name": "load_skill",
-     "description": "Load the full content of a skill by name.",
-     "input_schema": {"type": "object",
-                      "properties": {"name": {"type": "string"}},
-                      "required": ["name"]}},
     {"name": "compact",
      "description": "Summarize earlier conversation and continue with compacted context.",
      "input_schema": {"type": "object",
@@ -1766,10 +1710,7 @@ BUILTIN_TOOLS = [
 ]
 
 BUILTIN_HANDLERS = {
-    "bash": run_bash, "read_file": run_read, "write_file": run_write,
-    "edit_file": run_edit, "glob": run_glob,
     "todo_write": run_todo_write, "task": spawn_subagent,
-    "load_skill": load_skill,
     "create_task": run_create_task, "list_tasks": run_list_tasks,
     "get_task": run_get_task,
     "claim_task": run_claim_task, "complete_task": run_complete_task,

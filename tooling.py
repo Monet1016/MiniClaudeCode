@@ -14,6 +14,7 @@ class ToolResult:
 class ToolContext:
     cwd: str
     state: dict[str, Any] | None = None
+    permissions: dict[str, Any] | None = None
     runtime: dict[str, Any] | None = None
 
 
@@ -28,9 +29,12 @@ class ToolDefinition:
     input_schema: dict[str, Any]
     validator: Validator
     run: Runner
+    metadata: dict[str, Any] | None = None
 
 
 class ToolRegistry:
+    OUTPUT_CHAR_LIMIT = 20000
+
     def __init__(self, tools: list[ToolDefinition] | None = None) -> None:
         self._tools = []
         self._tool_index: dict[str, ToolDefinition] = {}
@@ -49,15 +53,28 @@ class ToolRegistry:
     def find(self, name: str) -> ToolDefinition | None:
         return self._tool_index.get(name)
 
+    @classmethod
+    def _normalize_output(cls, output: Any) -> str:
+        text = "" if output is None else str(output)
+        if len(text) <= cls.OUTPUT_CHAR_LIMIT:
+            return text
+
+        omitted = len(text) - cls.OUTPUT_CHAR_LIMIT
+        return f"{text[:cls.OUTPUT_CHAR_LIMIT]}\n...[truncated {omitted} chars]"
+
+    @classmethod
+    def _finalize_result(cls, ok: bool, output: Any) -> ToolResult:
+        return ToolResult(ok=ok, output=cls._normalize_output(output))
+
     def execute(self, tool_name: str, input_data: Any, context: ToolContext) -> ToolResult:
         tool = self.find(tool_name)
         if tool is None:
-            return ToolResult(ok=False, output=f"Unknown tool: {tool_name}")
+            return self._finalize_result(ok=False, output=f"Unknown tool: {tool_name}")
 
         try:
             parsed = tool.validator(input_data)
         except Exception as error:  # noqa: BLE001
-            return ToolResult(
+            return self._finalize_result(
                 ok=False,
                 output=f"Validation error in {tool_name}: {error}",
             )
@@ -68,10 +85,9 @@ class ToolRegistry:
                 raise TypeError(
                     f"Tool {tool_name} must return ToolResult, got {type(result).__name__}"
                 )
-            if result.output is None:
-                result.output = ""
+            result = self._finalize_result(ok=result.ok, output=result.output)
         except Exception as error:  # noqa: BLE001
-            return ToolResult(
+            return self._finalize_result(
                 ok=False,
                 output=f"Error running {tool_name}: {error}",
             )
