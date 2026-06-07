@@ -20,6 +20,9 @@ def validate(payload):
 def run(payload, context: ToolContext):
     try:
         file_path = safe_path(payload["path"], context.cwd)
+        if context.permissions is not None:
+            preview = f"write file: {payload['path']}\nbytes: {len(payload['content'])}"
+            context.permissions.ensure_edit(str(file_path), preview)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(payload["content"])
         return ok(f"Wrote {len(payload['content'])} bytes to {payload['path']}")

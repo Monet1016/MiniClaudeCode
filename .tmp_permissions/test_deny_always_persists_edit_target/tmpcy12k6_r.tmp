@@ -1,0 +1,10 @@
+{
+  "allowedDirectoryPrefixes": [],
+  "deniedDirectoryPrefixes": [],
+  "allowedCommandPatterns": [],
+  "deniedCommandPatterns": [],
+  "allowedEditTargets": [],
+  "deniedEditTargets": [
+    "D:\\blog-writer\\mini-claude-code\\.tmp_permissions\\test_deny_always_persists_edit_target\\workspace\\blocked.py"
+  ]
+}

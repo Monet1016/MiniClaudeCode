@@ -3,6 +3,11 @@ import unittest
 from tooling import ToolContext, ToolDefinition, ToolRegistry, ToolResult
 
 
+class PermissionLike:
+    def __init__(self) -> None:
+        self.allowed = True
+
+
 class ToolingTests(unittest.TestCase):
     def test_tool_context_exposes_permissions_and_runtime(self) -> None:
         context = ToolContext(
@@ -13,6 +18,15 @@ class ToolingTests(unittest.TestCase):
 
         self.assertEqual({"write": False}, context.permissions)
         self.assertEqual({"session": "abc"}, context.runtime)
+
+    def test_tool_context_accepts_permission_like_object(self) -> None:
+        permissions = PermissionLike()
+        context = ToolContext(
+            cwd="D:/workspace",
+            permissions=permissions,
+        )
+
+        self.assertIs(permissions, context.permissions)
 
     def test_tool_definition_preserves_metadata(self) -> None:
         tool = ToolDefinition(

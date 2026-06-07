@@ -1,0 +1,12 @@
+{
+  "commands": {
+    "allow": [],
+    "deny": []
+  },
+  "paths": {
+    "allow": [
+      "D:\\blog-writer\\mini-claude-code\\tmp_permissions\\p-d966d7b4\\shared"
+    ],
+    "deny": []
+  }
+}

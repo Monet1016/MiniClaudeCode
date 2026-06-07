@@ -48,6 +48,18 @@ def run(payload, context: ToolContext):
     payload = {"path": payload["path"], "replacements": normalized_replacements}
     try:
         target = safe_path(payload["path"], context.cwd)
+        if context.permissions is not None:
+            snippets = []
+            for item in payload["replacements"][:2]:
+                snippets.append(
+                    f"search: {item['search'][:40]} -> replace: {item['replace'][:40]}"
+                )
+            preview = (
+                f"path: {payload['path']}\n"
+                f"{len(payload['replacements'])} replacement(s)\n"
+                + "\n".join(snippets)
+            )
+            context.permissions.ensure_edit(str(target), preview)
         content = target.read_text(encoding="utf-8")
         for index, replacement in enumerate(payload["replacements"], start=1):
             if replacement["search"] not in content:

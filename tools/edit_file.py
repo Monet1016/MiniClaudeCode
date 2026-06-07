@@ -27,6 +27,13 @@ def validate(payload):
 def run(payload, context: ToolContext):
     try:
         file_path = safe_path(payload["path"], context.cwd)
+        if context.permissions is not None:
+            preview = (
+                f"path: {payload['path']}\n"
+                f"old: {payload['old_text'][:80]}\n"
+                f"new: {payload['new_text'][:80]}"
+            )
+            context.permissions.ensure_edit(str(file_path), preview)
         text = file_path.read_text()
         if payload["old_text"] not in text:
             return fail(f"Error: text not found in {payload['path']}")

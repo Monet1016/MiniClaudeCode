@@ -1,0 +1,10 @@
+{
+  "allowedDirectoryPrefixes": [],
+  "deniedDirectoryPrefixes": [],
+  "allowedCommandPatterns": [
+    "git reset --hard"
+  ],
+  "deniedCommandPatterns": [],
+  "allowedEditTargets": [],
+  "deniedEditTargets": []
+}

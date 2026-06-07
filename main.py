@@ -33,6 +33,7 @@ from context_compaction import (
     tool_result_budget as tool_result_budget_core,
 )
 from cron_core import CronStore
+from permissions import PermissionManager
 from protocol_core import ProtocolStore
 from session_tools_core import TodoState
 from skills import list_skills as list_skill_records, load_skill as load_skill_record
@@ -84,6 +85,32 @@ PROTOCOL_STORE = ProtocolStore()
 active_teammates: dict[str, bool] = {}
 
 
+def permission_prompt_handler(request: dict[str, object]) -> dict[str, object]:
+    print(f"\n\033[33m[permission] {request['summary']}\033[0m")
+    for detail in request.get("details", []):
+        print(f"  {detail}")
+    print(f"  scope: {request['scope']}")
+    for choice in request.get("choices", []):
+        print(f"  {choice['key']}: {choice['label']}")
+
+    allowed_keys = {
+        str(choice["key"]): str(choice["decision"])
+        for choice in request.get("choices", [])
+    }
+    response = input("  Select choice: ").strip()
+    decision = allowed_keys.get(response)
+    if decision is None:
+        decision = "deny_once"
+    return {"decision": decision}
+
+
+def build_permission_manager() -> PermissionManager:
+    return PermissionManager(str(WORKDIR), prompt=permission_prompt_handler)
+
+
+PERMISSIONS = build_permission_manager()
+
+
 def terminal_print(text: str):
     if threading.current_thread() is threading.main_thread() or not CLI_ACTIVE:
         print(text)
@@ -130,6 +157,7 @@ def create_subagent_tool_registry() -> ToolRegistry:
 
 
 def runtime_state(messages: list | None = None, sender: str = "lead", agent_name: str = "lead") -> dict:
+    permissions = globals().get("PERMISSIONS")
     return {
         "messages": messages if messages is not None else [],
         "compact_history": compact_history,
@@ -141,6 +169,7 @@ def runtime_state(messages: list | None = None, sender: str = "lead", agent_name
         "worktree_manager": WORKTREE_MANAGER,
         "cron_store": CRON_STORE,
         "todo_state": TODO_STATE,
+        "permissions": permissions,
         "sender": sender,
         "agent_name": agent_name,
     }
@@ -466,7 +495,10 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                     tool_result = registry.execute(
                         block.name,
                         block.input,
-                        ToolContext(cwd=wt_ctx["path"] or str(WORKDIR)),
+                        ToolContext(
+                            cwd=wt_ctx["path"] or str(WORKDIR),
+                            permissions=PERMISSIONS,
+                        ),
                     )
                     results.append({"type": "tool_result", "tool_use_id": block.id, "content": tool_result.output})
                 messages.append({"role": "user", "content": results})
@@ -520,28 +552,7 @@ def trigger_hooks(event: str, *args):
     return None
 
 
-DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
-DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
-
-
 def permission_hook(block):
-    if block.name == "bash":
-        command = block.input.get("command", "")
-        for pattern in DENY_LIST:
-            if pattern in command:
-                return f"Permission denied: '{pattern}' is on the deny list"
-        if any(token in command for token in DESTRUCTIVE):
-            print(f"\n\033[33m[permission] destructive command\033[0m")
-            print(f"  {command}")
-            choice = input("  Allow? [y/N] ").strip().lower()
-            if choice not in ("y", "yes"):
-                return "Permission denied by user"
-    if block.name in ("write_file", "edit_file"):
-        path = block.input.get("path", "")
-        try:
-            safe_path(path)
-        except Exception:
-            return f"Permission denied: path escapes workspace: {path}"
     if block.name.startswith("mcp__") and "deploy" in block.name:
         print(f"\n\033[33m[permission] MCP destructive-looking tool: {block.name}\033[0m")
         choice = input("  Allow? [y/N] ").strip().lower()

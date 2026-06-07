@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tooling import ToolContext, ToolDefinition
-from tools.common import fail, ok, safe_path
+from tools.common import fail, ok, resolve_path
 
 
 def validate(payload):
@@ -15,7 +15,9 @@ def validate(payload):
 
 def run(payload, context: ToolContext):
     try:
-        target = safe_path(payload["path"], context.cwd)
+        target = resolve_path(payload["path"], context.cwd)
+        if context.permissions is not None:
+            context.permissions.ensure_path_access(str(target), "list")
         if not target.exists():
             return fail(f"Path does not exist: {payload['path']}")
         if target.is_file():

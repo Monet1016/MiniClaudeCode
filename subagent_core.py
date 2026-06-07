@@ -72,7 +72,11 @@ def spawn_subagent(
                 tool_result = registry.execute(
                     block.name,
                     block.input,
-                    ToolContext(cwd=effective_cwd, runtime=runtime),
+                    ToolContext(
+                        cwd=effective_cwd,
+                        permissions=None if runtime is None else runtime.get("permissions"),
+                        runtime=runtime,
+                    ),
                 )
                 output = tool_result.output
                 trigger_hooks("PostToolUse", block, output)

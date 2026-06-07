@@ -1,0 +1,12 @@
+{
+  "commands": {
+    "allow": [],
+    "deny": []
+  },
+  "paths": {
+    "allow": [
+      "D:\\blog-writer\\mini-claude-code\\.tmp_permissions\\test_allow_always_persists_external_directory_across_managers\\shared"
+    ],
+    "deny": []
+  }
+}

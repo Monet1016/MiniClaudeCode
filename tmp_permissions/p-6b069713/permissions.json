@@ -1,0 +1,12 @@
+{
+  "commands": {
+    "allow": [
+      "python script.py"
+    ],
+    "deny": []
+  },
+  "paths": {
+    "allow": [],
+    "deny": []
+  }
+}

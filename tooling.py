@@ -14,7 +14,7 @@ class ToolResult:
 class ToolContext:
     cwd: str
     state: dict[str, Any] | None = None
-    permissions: dict[str, Any] | None = None
+    permissions: Any | None = None
     runtime: dict[str, Any] | None = None
 
 

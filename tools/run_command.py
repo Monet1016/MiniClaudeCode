@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 from tooling import ToolContext, ToolDefinition
-from tools.common import fail, ok, safe_path
+from tools.common import fail, ok, resolve_path
 
 
 def validate(payload):
@@ -43,7 +43,24 @@ def run(payload, context: ToolContext):
         "timeout": payload.get("timeout", 120),
     }
     workspace_root = Path(context.cwd).resolve()
-    effective_cwd = workspace_root if payload["cwd"] is None else safe_path(payload["cwd"], workspace_root)
+    effective_cwd = (
+        workspace_root
+        if payload["cwd"] is None
+        else resolve_path(payload["cwd"], workspace_root)
+    )
+    if context.permissions is not None:
+        context.permissions.ensure_path_access(str(effective_cwd), "command_cwd")
+        force_prompt_reason = None
+        if not payload["args"]:
+            force_prompt_reason = (
+                f"shell command executes arbitrary local code ({payload['command']})"
+            )
+        context.permissions.ensure_command(
+            payload["command"],
+            payload["args"],
+            str(effective_cwd),
+            force_prompt_reason=force_prompt_reason,
+        )
 
     try:
         if payload["args"]:

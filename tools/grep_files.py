@@ -4,7 +4,7 @@ import fnmatch
 import re
 
 from tooling import ToolContext, ToolDefinition
-from tools.common import fail, ok, safe_path
+from tools.common import fail, ok, resolve_path
 
 SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules", "dist", "build"}
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".db", ".pyc"}
@@ -52,7 +52,9 @@ def run(payload, context: ToolContext):
         "context_lines": payload.get("context_lines", 0),
     }
     try:
-        root = safe_path(payload["path"], context.cwd)
+        root = resolve_path(payload["path"], context.cwd)
+        if context.permissions is not None:
+            context.permissions.ensure_path_access(str(root), "search")
         flags = 0 if payload["case_sensitive"] else re.IGNORECASE
         regex = re.compile(payload["pattern"], flags)
         results: list[str] = []

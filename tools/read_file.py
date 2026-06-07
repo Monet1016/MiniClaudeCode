@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from tooling import ToolContext, ToolDefinition
 
-from tools.common import fail, ok, safe_path
+from tools.common import fail, ok, resolve_path
 
 
 def validate(payload):
@@ -26,7 +26,10 @@ def validate(payload):
 
 def run(payload, context: ToolContext):
     try:
-        lines = safe_path(payload["path"], context.cwd).read_text().splitlines()
+        target = resolve_path(payload["path"], context.cwd)
+        if context.permissions is not None:
+            context.permissions.ensure_path_access(str(target), "read")
+        lines = target.read_text().splitlines()
         offset = max(int(payload.get("offset", 0) or 0), 0)
         limit = payload.get("limit")
         limit = int(limit) if limit is not None else None
