@@ -7,6 +7,7 @@ import time
 from typing import Any, Callable
 
 from background_tasks import collect_background_notifications
+from context_compactor import CompactTrigger
 from tooling import ToolContext
 
 DEFAULT_MAX_TOKENS = 8000
@@ -25,18 +26,11 @@ class AgentLoopDeps:
     assemble_tool_pool: Callable[[], tuple[list[dict], Any]]
     get_runtime: Callable[[], dict]
     update_context: Callable[[dict, list], dict]
-    compact_history: Callable[[list], list]
-    reactive_compact: Callable[[list], list]
     consume_cron_queue: Callable[[], list]
-    tool_result_budget: Callable[[list], list]
-    snip_compact: Callable[[list], list]
-    micro_compact: Callable[[list], list]
-    estimate_size: Callable[[list], int]
     trigger_hooks: Callable[..., Any]
     terminal_print: Callable[[str], None]
     has_tool_use: Callable[[Any], bool]
     workspace_root: str
-    context_limit: int
     primary_model: str
     fallback_model: str | None
 
@@ -123,13 +117,46 @@ def is_prompt_too_long_error(exc: Exception) -> bool:
     )
 
 
-def prepare_context(messages: list, deps: AgentLoopDeps) -> list:
-    messages[:] = deps.tool_result_budget(messages)
-    messages[:] = deps.snip_compact(messages)
-    messages[:] = deps.micro_compact(messages)
-    if deps.estimate_size(messages) > deps.context_limit:
-        messages[:] = deps.compact_history(messages)
+def run_context_cycle(messages: list, deps: AgentLoopDeps, step: int, tool_error_count: int) -> list:
+    runtime = deps.get_runtime()
+    context_manager = runtime.get("context_manager")
+    context_cybernetics = runtime.get("context_cybernetics")
+    context_compactor = runtime.get("context_compactor")
+
+    if context_manager is not None:
+        context_manager.replace_messages(messages)
+
+    run_cycle = getattr(context_cybernetics, "run_cycle", None)
+    if callable(run_cycle):
+        result = run_cycle(
+            messages,
+            step=step,
+            tool_error_count=tool_error_count,
+        )
+        if getattr(result, "did_compact", False):
+            messages[:] = result.messages
+            return messages
+
+    process_request = getattr(context_compactor, "process_request", None)
+    if callable(process_request):
+        result = process_request(messages, trigger=CompactTrigger.REQUEST)
+        if getattr(result, "did_compact", False):
+            messages[:] = result.messages
+
     return messages
+
+
+def safety_snip_messages(messages: list, max_messages: int = 8) -> list:
+    if len(messages) <= max_messages:
+        return list(messages)
+    keep_head = 2
+    keep_tail = max(1, max_messages - 3)
+    snipped = len(messages) - keep_head - keep_tail
+    return (
+        list(messages[:keep_head])
+        + [{"role": "user", "content": f"[snipped {snipped} messages]"}]
+        + list(messages[-keep_tail:])
+    )
 
 
 def build_user_content(results: list[dict]) -> list[dict]:
@@ -176,12 +203,15 @@ def agent_loop(messages: list, context: dict, deps: AgentLoopDeps) -> None:
     state = RecoveryState(deps.primary_model)
     max_tokens = DEFAULT_MAX_TOKENS
     permissions = deps.get_runtime().get("permissions")
+    step = 0
+    tool_error_count = 0
 
     if permissions is not None:
         permissions.begin_turn()
 
     try:
         while True:
+            step += 1
             fired = deps.consume_cron_queue()
             for job in fired:
                 prompt = getattr(job, "prompt", None)
@@ -201,19 +231,28 @@ def agent_loop(messages: list, context: dict, deps: AgentLoopDeps) -> None:
                 )
                 rounds_since_todo = 0
 
-            prepare_context(messages, deps)
+            run_context_cycle(messages, deps, step=step, tool_error_count=tool_error_count)
             context = deps.update_context(context, messages)
             tools, registry = deps.assemble_tool_pool()
 
             try:
                 response = call_llm(messages, context, tools, state, max_tokens, deps)
             except Exception as exc:
-                if (
-                    is_prompt_too_long_error(exc)
-                    and not state.has_attempted_reactive_compact
-                ):
-                    deps.terminal_print("  \033[31m[prompt too long] attempting reactive compact\033[0m")
-                    messages[:] = deps.reactive_compact(messages)
+                if is_prompt_too_long_error(exc) and not state.has_attempted_reactive_compact:
+                    deps.terminal_print("  \033[31m[prompt too long] attempting reactive recover\033[0m")
+                    runtime = deps.get_runtime()
+                    context_cybernetics = runtime.get("context_cybernetics")
+                    context_compactor = runtime.get("context_compactor")
+                    recovered = None
+                    if context_cybernetics is not None:
+                        recovered = context_cybernetics.try_reactive_recover(messages, reason=str(exc))
+                    if (recovered is None or not getattr(recovered, "did_compact", False)) and context_compactor is not None:
+                        recovered = context_compactor.reactive_recover(messages, focus=str(exc))
+                    if recovered is not None and getattr(recovered, "did_compact", False):
+                        messages[:] = recovered.messages
+                        state.has_attempted_reactive_compact = True
+                        continue
+                    messages[:] = safety_snip_messages(messages)
                     state.has_attempted_reactive_compact = True
                     continue
                 messages.append(
@@ -256,19 +295,9 @@ def agent_loop(messages: list, context: dict, deps: AgentLoopDeps) -> None:
                     continue
                 deps.terminal_print(f"\033[36m> {_block_value(block, 'name')}\033[0m")
 
-                if _block_value(block, "name") == "compact":
-                    messages[:] = deps.compact_history(messages)
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": "[Compacted. Continue with summarized context.]",
-                        }
-                    )
-                    compacted_now = True
-                    break
-
                 blocked = deps.trigger_hooks("PreToolUse", block)
                 if blocked:
+                    tool_error_count += 1
                     results.append(
                         {
                             "type": "tool_result",
@@ -292,6 +321,11 @@ def agent_loop(messages: list, context: dict, deps: AgentLoopDeps) -> None:
                     )
                 else:
                     deps.terminal_print(str(output)[:300])
+
+                if getattr(tool_result, "ok", True):
+                    tool_error_count = 0
+                else:
+                    tool_error_count += 1
 
                 if _block_value(block, "name") == "todo_write":
                     rounds_since_todo = 0

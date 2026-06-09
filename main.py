@@ -25,6 +25,8 @@ from agent_loop import (
     cron_autorun_loop,
     print_turn_assistants,
 )
+from context_compactor import AutoCompactConfig, CompactStrategy, CompactTrigger, ContextCompactor
+from context_cybernetics import ContextCyberneticsOrchestrator
 from context_compaction import (
     compact_history as compact_history_core,
     estimate_size,
@@ -33,6 +35,7 @@ from context_compaction import (
     snip_compact as snip_compact_core,
     tool_result_budget as tool_result_budget_core,
 )
+from context_manager import ContextManager, estimate_message_tokens
 from cron_core import CronStore
 from permissions import PermissionManager
 from protocol_core import ProtocolStore
@@ -185,23 +188,110 @@ def create_subagent_tool_registry() -> ToolRegistry:
     return build_subagent_tool_registry(str(WORKDIR))
 
 
+def build_context_components() -> tuple[ContextManager, ContextCompactor, ContextCyberneticsOrchestrator]:
+    context_manager = ContextManager(model=MODEL, context_window=CONTEXT_LIMIT)
+    compact_config = AutoCompactConfig(
+        max_bytes=200_000,
+        persist_threshold=PERSIST_THRESHOLD,
+        keep_recent_tool_results=KEEP_RECENT_TOOL_RESULTS,
+        soft_ratio=0.82,
+        hard_ratio=0.92,
+        preserve_tail=6,
+        snip_max_messages=24,
+    )
+
+    def llm_summarizer(messages: list[dict], focus: str | None = None) -> str:
+        conversation = json.dumps(messages, default=str)[:80000]
+        prompt = (
+            "Summarize this coding-agent conversation so work can continue. "
+            "Preserve current goal, key findings, changed files, remaining work, "
+            "user constraints, and unresolved blockers.\n\n"
+        )
+        if focus:
+            prompt += f"Focus: {focus}\n\n"
+        prompt += conversation
+        response = client.messages.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=2000,
+        )
+        return extract_text(response.content) or "(empty summary)"
+
+    context_compactor = ContextCompactor(
+        context_window=context_manager.context_window,
+        workspace=WORKDIR,
+        memory_manager=None,
+        estimate_fn=estimate_message_tokens,
+        transcript_dir=TRANSCRIPT_DIR,
+        tool_results_dir=TOOL_RESULTS_DIR,
+        llm_summarizer=llm_summarizer,
+        config=compact_config,
+    )
+    context_cybernetics = ContextCyberneticsOrchestrator(
+        context_manager=context_manager,
+        context_compactor=context_compactor,
+        kp=2.0,
+        ki=0.15,
+        kd=0.3,
+        pid_setpoint=0.70,
+        base_threshold=0.85,
+        safety_margin_turns=3,
+        enabled=True,
+    )
+    return context_manager, context_compactor, context_cybernetics
+
+
+def manual_compact(messages: list, runtime: dict, focus: str | None = None) -> list:
+    context_manager = runtime["context_manager"]
+    context_compactor = runtime["context_compactor"]
+    result = context_compactor.process_request(
+        messages,
+        trigger=CompactTrigger.MANUAL,
+        focus=focus,
+        force_strategy=CompactStrategy.STRUCTURED,
+    )
+    context_manager.replace_messages(result.messages)
+    context_manager.record_compaction(
+        {
+            "strategy": result.strategy.value,
+            "trigger": result.trigger.value,
+            "tokens_before": result.tokens_before,
+            "tokens_after": result.tokens_after,
+        }
+    )
+    return result.messages
+
+
 def runtime_state(messages: list | None = None, sender: str = "lead", agent_name: str = "lead") -> dict:
     permissions = globals().get("PERMISSIONS")
-    return {
-        "messages": messages if messages is not None else [],
-        "compact_history": compact_history,
-        "spawn_subagent": spawn_subagent,
-        "spawn_teammate": spawn_teammate_thread,
-        "message_bus": BUS,
-        "protocol_store": PROTOCOL_STORE,
-        "task_store": TASK_STORE,
-        "worktree_manager": WORKTREE_MANAGER,
-        "cron_store": CRON_STORE,
-        "todo_state": TODO_STATE,
-        "permissions": permissions,
-        "sender": sender,
-        "agent_name": agent_name,
-    }
+    context_manager, context_compactor, context_cybernetics = build_context_components()
+    runtime: dict[str, object] = {}
+
+    def runtime_manual_compact(current_messages: list, focus: str | None = None) -> list:
+        return manual_compact(current_messages, runtime, focus=focus)
+
+    runtime.update(
+        {
+            "messages": messages if messages is not None else [],
+            "manual_compact": runtime_manual_compact,
+            "compact_history": compact_history,
+            "spawn_subagent": spawn_subagent,
+            "spawn_teammate": spawn_teammate_thread,
+            "message_bus": BUS,
+            "protocol_store": PROTOCOL_STORE,
+            "task_store": TASK_STORE,
+            "worktree_manager": WORKTREE_MANAGER,
+            "cron_store": CRON_STORE,
+            "todo_state": TODO_STATE,
+            "permissions": permissions,
+            "context_manager": context_manager,
+            "context_compactor": context_compactor,
+            "context_cybernetics": context_cybernetics,
+            "sender": sender,
+            "agent_name": agent_name,
+        }
+    )
+    return runtime
 
 
 def build_runtime_context(messages: list | None = None, sender: str = "lead", agent_name: str = "lead") -> dict:
@@ -216,17 +306,19 @@ def build_child_runtime_context(
     sender: str = "subagent",
     agent_name: str = "subagent",
 ) -> dict:
-    runtime = dict(parent_runtime)
-    runtime.update(
-        {
-            "messages": messages if messages is not None else [],
-            "compact_history": compact_history,
-            "sender": sender,
-            "agent_name": agent_name,
-        }
+    child_runtime = build_runtime_context(
+        messages=messages,
+        sender=sender,
+        agent_name=agent_name,
     )
-    runtime["spawn_subagent"] = build_spawn_subagent_callback(runtime)
-    return runtime
+    child_runtime["message_bus"] = parent_runtime["message_bus"]
+    child_runtime["protocol_store"] = parent_runtime["protocol_store"]
+    child_runtime["task_store"] = parent_runtime["task_store"]
+    child_runtime["worktree_manager"] = parent_runtime["worktree_manager"]
+    child_runtime["cron_store"] = parent_runtime["cron_store"]
+    child_runtime["todo_state"] = parent_runtime["todo_state"]
+    child_runtime["permissions"] = parent_runtime.get("permissions")
+    return child_runtime
 
 
 def build_spawn_subagent_callback(parent_runtime: dict):
@@ -842,28 +934,22 @@ def consume_cron_queue():
 
 
 def build_agent_loop_deps(messages: list) -> AgentLoopDeps:
+    runtime = build_runtime_context(
+        messages=messages,
+        sender="lead",
+        agent_name="lead",
+    )
     return AgentLoopDeps(
         client=client,
         assemble_system_prompt=assemble_system_prompt,
         assemble_tool_pool=assemble_tool_pool,
-        get_runtime=lambda: build_runtime_context(
-            messages=messages,
-            sender="lead",
-            agent_name="lead",
-        ),
+        get_runtime=lambda: runtime,
         update_context=update_context,
-        compact_history=compact_history,
-        reactive_compact=reactive_compact,
         consume_cron_queue=consume_cron_queue,
-        tool_result_budget=tool_result_budget,
-        snip_compact=snip_compact,
-        micro_compact=micro_compact,
-        estimate_size=estimate_size,
         trigger_hooks=trigger_hooks,
         terminal_print=terminal_print,
         has_tool_use=has_tool_use,
         workspace_root=str(WORKDIR),
-        context_limit=CONTEXT_LIMIT,
         primary_model=PRIMARY_MODEL,
         fallback_model=FALLBACK_MODEL,
     )

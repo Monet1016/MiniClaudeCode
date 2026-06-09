@@ -155,6 +155,55 @@ class MainToolPoolAssemblyTests(unittest.TestCase):
         ]:
             self.assertIn(expected, registry.list_all())
 
+    def test_build_context_components_returns_wired_triplet(self):
+        main_module = load_main_module("mini_claude_main_context_components")
+
+        manager, compactor, cybernetics = main_module.build_context_components()
+
+        self.assertEqual(main_module.CONTEXT_LIMIT, manager.context_window)
+        self.assertEqual(main_module.TOOL_RESULTS_DIR, compactor.tool_results_dir)
+        self.assertIs(cybernetics.context_manager, manager)
+        self.assertIs(cybernetics.context_compactor, compactor)
+
+    def test_build_runtime_context_exposes_context_control_objects(self):
+        main_module = load_main_module("mini_claude_main_runtime_context_objects")
+        history = [{"role": "user", "content": "hello"}]
+
+        runtime = main_module.build_runtime_context(messages=history)
+
+        self.assertIs(runtime["messages"], history)
+        self.assertTrue(callable(runtime["manual_compact"]))
+        self.assertEqual(main_module.CONTEXT_LIMIT, runtime["context_manager"].context_window)
+        self.assertIs(runtime["context_cybernetics"].context_manager, runtime["context_manager"])
+        self.assertIs(runtime["context_cybernetics"].context_compactor, runtime["context_compactor"])
+
+    def test_build_child_runtime_keeps_manual_compact_but_gets_fresh_context_objects(self):
+        main_module = load_main_module("mini_claude_main_child_context_objects")
+        parent_runtime = main_module.build_runtime_context(messages=[{"role": "user", "content": "parent"}])
+        child_runtime = main_module.build_child_runtime_context(
+            parent_runtime=parent_runtime,
+            messages=[{"role": "user", "content": "child"}],
+            sender="subagent",
+            agent_name="subagent",
+        )
+
+        self.assertTrue(callable(child_runtime["manual_compact"]))
+        self.assertIsNot(child_runtime["context_manager"], parent_runtime["context_manager"])
+        self.assertIsNot(child_runtime["context_compactor"], parent_runtime["context_compactor"])
+        self.assertIsNot(child_runtime["context_cybernetics"], parent_runtime["context_cybernetics"])
+        self.assertEqual("child", child_runtime["messages"][0]["content"])
+
+    def test_build_agent_loop_deps_reuses_same_runtime_across_calls(self):
+        main_module = load_main_module("mini_claude_main_runtime_reuse")
+        messages = [{"role": "user", "content": "hello"}]
+
+        deps = main_module.build_agent_loop_deps(messages)
+        first = deps.get_runtime()
+        second = deps.get_runtime()
+
+        self.assertIs(first, second)
+        self.assertIs(first["context_manager"], second["context_manager"])
+
 
 if __name__ == "__main__":
     unittest.main()
