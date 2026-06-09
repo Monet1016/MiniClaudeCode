@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -18,6 +19,7 @@ PermissionDecision = Literal[
 ]
 
 PromptHandler = Callable[[dict[str, Any]], dict[str, Any]]
+BackgroundPromptHandler = Callable[[dict[str, Any]], None]
 PERMISSIONS_PATH = Path.home() / ".mini-claude-code" / "permissions.json"
 _is_win = sys.platform == "win32"
 _normalize_path_cached = lru_cache(maxsize=512)(lambda p: str(Path(p).resolve()))
@@ -134,10 +136,12 @@ class PermissionManager:
         prompt: PromptHandler | None = None,
         permissions_path: Path | None = None,
         prompt_handler: PromptHandler | None = None,
+        background_prompt_handler: BackgroundPromptHandler | None = None,
     ) -> None:
         self.workspace_root = _normalize_path(workspace_root)
         self.prompt = prompt if prompt is not None else prompt_handler
         self.permissions_path = permissions_path
+        self.background_prompt_handler = background_prompt_handler
         self.allowed_directory_prefixes: set[str] = set()
         self.denied_directory_prefixes: set[str] = set()
         self.session_allowed_paths: set[str] = set()
@@ -153,6 +157,16 @@ class PermissionManager:
         self.turn_allowed_edits: set[str] = set()
         self.turn_allow_all_edits = False
         self._initialize()
+
+    def _reject_background_prompt(self, request: dict[str, Any]) -> None:
+        if threading.current_thread() is threading.main_thread():
+            return
+        if self.background_prompt_handler is not None:
+            self.background_prompt_handler(request)
+        scope = request.get("scope", "(unknown scope)")
+        raise RuntimeError(
+            f"Permission request from background thread requires main-thread approval: {scope}"
+        )
 
 
     def _store_path(self) -> Path:
@@ -257,24 +271,24 @@ class PermissionManager:
             if intent in {"list", "command_cwd"}
             else str(Path(normalized_target).parent)
         )
-        result = self.prompt(
-            {
-                "kind": "path",
-                "summary": f"mini-claude-code wants {intent.replace('_', ' ')} access outside the current cwd",
-                "details": [
-                    f"cwd: {self.workspace_root}",
-                    f"target: {normalized_target}",
-                    f"scope directory: {scope_directory}",
-                ],
-                "scope": scope_directory,
-                "choices": [
-                    {"key": "y", "label": "allow once", "decision": "allow_once"},
-                    {"key": "a", "label": "allow this directory", "decision": "allow_always"},
-                    {"key": "n", "label": "deny once", "decision": "deny_once"},
-                    {"key": "d", "label": "deny this directory", "decision": "deny_always"},
-                ],
-            }
-        )
+        request = {
+            "kind": "path",
+            "summary": f"mini-claude-code wants {intent.replace('_', ' ')} access outside the current cwd",
+            "details": [
+                f"cwd: {self.workspace_root}",
+                f"target: {normalized_target}",
+                f"scope directory: {scope_directory}",
+            ],
+            "scope": scope_directory,
+            "choices": [
+                {"key": "y", "label": "allow once", "decision": "allow_once"},
+                {"key": "a", "label": "allow this directory", "decision": "allow_always"},
+                {"key": "n", "label": "deny once", "decision": "deny_once"},
+                {"key": "d", "label": "deny this directory", "decision": "deny_always"},
+            ],
+        }
+        self._reject_background_prompt(request)
+        result = self.prompt(request)
         decision = result.get("decision")
         if decision == "allow_once":
             self.session_allowed_paths.add(normalized_target)
@@ -310,20 +324,20 @@ class PermissionManager:
         if self.prompt is None:
             raise RuntimeError(f"Command requires approval: {signature}")
 
-        result = self.prompt(
-            {
-                "kind": "command",
-                "summary": "mini-claude-code wants approval for this command",
-                "details": [f"cwd: {command_cwd}", f"command: {signature}", f"reason: {reason}"],
-                "scope": signature,
-                "choices": [
-                    {"key": "y", "label": "allow once", "decision": "allow_once"},
-                    {"key": "a", "label": "always allow this command", "decision": "allow_always"},
-                    {"key": "n", "label": "deny once", "decision": "deny_once"},
-                    {"key": "d", "label": "always deny this command", "decision": "deny_always"},
-                ],
-            }
-        )
+        request = {
+            "kind": "command",
+            "summary": "mini-claude-code wants approval for this command",
+            "details": [f"cwd: {command_cwd}", f"command: {signature}", f"reason: {reason}"],
+            "scope": signature,
+            "choices": [
+                {"key": "y", "label": "allow once", "decision": "allow_once"},
+                {"key": "a", "label": "always allow this command", "decision": "allow_always"},
+                {"key": "n", "label": "deny once", "decision": "deny_once"},
+                {"key": "d", "label": "always deny this command", "decision": "deny_always"},
+            ],
+        }
+        self._reject_background_prompt(request)
+        result = self.prompt(request)
         decision = result.get("decision")
         if decision == "allow_once":
             self.session_allowed_commands.add(signature)
@@ -354,22 +368,22 @@ class PermissionManager:
         if self.prompt is None:
             raise RuntimeError(f"Edit requires approval: {normalized_target}")
 
-        result = self.prompt(
-            {
-                "kind": "edit",
-                "summary": "mini-claude-code wants to modify a file",
-                "details": [f"path: {normalized_target}", diff_preview],
-                "scope": normalized_target,
-                "choices": [
-                    {"key": "y", "label": "allow once", "decision": "allow_once"},
-                    {"key": "t", "label": "allow this turn", "decision": "allow_turn"},
-                    {"key": "T", "label": "allow all edits this turn", "decision": "allow_all_turn"},
-                    {"key": "a", "label": "always allow this file", "decision": "allow_always"},
-                    {"key": "n", "label": "deny once", "decision": "deny_once"},
-                    {"key": "d", "label": "always deny this file", "decision": "deny_always"},
-                ],
-            }
-        )
+        request = {
+            "kind": "edit",
+            "summary": "mini-claude-code wants to modify a file",
+            "details": [f"path: {normalized_target}", diff_preview],
+            "scope": normalized_target,
+            "choices": [
+                {"key": "y", "label": "allow once", "decision": "allow_once"},
+                {"key": "t", "label": "allow this turn", "decision": "allow_turn"},
+                {"key": "T", "label": "allow all edits this turn", "decision": "allow_all_turn"},
+                {"key": "a", "label": "always allow this file", "decision": "allow_always"},
+                {"key": "n", "label": "deny once", "decision": "deny_once"},
+                {"key": "d", "label": "always deny this file", "decision": "deny_always"},
+            ],
+        }
+        self._reject_background_prompt(request)
+        result = self.prompt(request)
         decision = result.get("decision")
         if decision == "allow_once":
             self.session_allowed_edits.add(normalized_target)

@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import threading
+from _thread import interrupt_main
 from datetime import datetime
 from pathlib import Path
 
@@ -83,6 +84,30 @@ BUS = MessageBus(MAILBOX_DIR)
 GLOBAL_BUS.mailbox_dir = MAILBOX_DIR
 PROTOCOL_STORE = ProtocolStore()
 active_teammates: dict[str, bool] = {}
+BACKGROUND_PERMISSION_ABORT = False
+BACKGROUND_PERMISSION_SCOPE: str | None = None
+
+
+def handle_background_permission_request(request: dict[str, object]) -> None:
+    global BACKGROUND_PERMISSION_ABORT, BACKGROUND_PERMISSION_SCOPE
+    scope = request.get("scope", "(unknown scope)")
+    BACKGROUND_PERMISSION_ABORT = True
+    BACKGROUND_PERMISSION_SCOPE = str(scope)
+    print(
+        "\n\033[31m[permission] background task requested interactive approval; "
+        f"stopping session. scope: {scope}\033[0m"
+    )
+    interrupt_main()
+
+
+def consume_background_permission_abort() -> str | None:
+    global BACKGROUND_PERMISSION_ABORT, BACKGROUND_PERMISSION_SCOPE
+    if not BACKGROUND_PERMISSION_ABORT:
+        return None
+    scope = BACKGROUND_PERMISSION_SCOPE
+    BACKGROUND_PERMISSION_ABORT = False
+    BACKGROUND_PERMISSION_SCOPE = None
+    return scope
 
 
 def permission_prompt_handler(request: dict[str, object]) -> dict[str, object]:
@@ -105,7 +130,11 @@ def permission_prompt_handler(request: dict[str, object]) -> dict[str, object]:
 
 
 def build_permission_manager() -> PermissionManager:
-    return PermissionManager(str(WORKDIR), prompt=permission_prompt_handler)
+    return PermissionManager(
+        str(WORKDIR),
+        prompt=permission_prompt_handler,
+        background_prompt_handler=handle_background_permission_request,
+    )
 
 
 PERMISSIONS = build_permission_manager()
@@ -851,27 +880,38 @@ if __name__ == "__main__":
     while True:
         try:
             query = input(PROMPT)
-        except (EOFError, KeyboardInterrupt):
-            break
-        if query.strip().lower() in ("q", "exit", ""):
-            break
-        trigger_hooks("UserPromptSubmit", query)
-        turn_start = len(history)
-        history.append({"role": "user", "content": query})
-        with agent_lock:
-            agent_loop(history, context, deps)
-            context = update_context(context, history)
-            print_turn_assistants(history, turn_start, deps)
-        inbox = consume_lead_inbox(route_protocol=True)
-        if inbox:
-            def inbox_label(message):
-                request_id = message.get("metadata", {}).get("request_id", "")
-                suffix = f" req:{request_id}" if request_id else ""
-                return f"{message.get('type', 'message')}{suffix}"
+            if query.strip().lower() in ("q", "exit", ""):
+                break
+            trigger_hooks("UserPromptSubmit", query)
+            turn_start = len(history)
+            history.append({"role": "user", "content": query})
+            with agent_lock:
+                agent_loop(history, context, deps)
+                context = update_context(context, history)
+                print_turn_assistants(history, turn_start, deps)
+            inbox = consume_lead_inbox(route_protocol=True)
+            if inbox:
+                def inbox_label(message):
+                    request_id = message.get("metadata", {}).get("request_id", "")
+                    suffix = f" req:{request_id}" if request_id else ""
+                    return f"{message.get('type', 'message')}{suffix}"
 
-            inbox_text = "\n".join(
-                f"From {message['from']} [{inbox_label(message)}]: {message['content'][:200]}"
-                for message in inbox
+                inbox_text = "\n".join(
+                    f"From {message['from']} [{inbox_label(message)}]: {message['content'][:200]}"
+                    for message in inbox
+                )
+                history.append({"role": "user", "content": f"[Inbox]\n{inbox_text}"})
+            print()
+        except EOFError:
+            break
+        except KeyboardInterrupt:
+            scope = consume_background_permission_abort()
+            if scope is None:
+                print()
+                break
+            print(
+                "\033[31mSession interrupted because a background task required "
+                f"interactive permission approval: {scope}\033[0m"
             )
-            history.append({"role": "user", "content": f"[Inbox]\n{inbox_text}"})
-        print()
+            print()
+            continue
