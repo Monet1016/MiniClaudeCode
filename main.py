@@ -27,14 +27,6 @@ from agent_loop import (
 )
 from context_compactor import AutoCompactConfig, CompactStrategy, CompactTrigger, ContextCompactor
 from context_cybernetics import ContextCyberneticsOrchestrator
-from context_compaction import (
-    compact_history as compact_history_core,
-    estimate_size,
-    micro_compact as micro_compact_core,
-    reactive_compact as reactive_compact_core,
-    snip_compact as snip_compact_core,
-    tool_result_budget as tool_result_budget_core,
-)
 from context_manager import ContextManager, estimate_message_tokens
 from cron_core import CronStore
 from permissions import PermissionManager
@@ -274,7 +266,6 @@ def runtime_state(messages: list | None = None, sender: str = "lead", agent_name
         {
             "messages": messages if messages is not None else [],
             "manual_compact": runtime_manual_compact,
-            "compact_history": compact_history,
             "spawn_subagent": spawn_subagent,
             "spawn_teammate": spawn_teammate_thread,
             "message_bus": BUS,
@@ -725,45 +716,6 @@ def spawn_subagent(description: str) -> str:
     return build_spawn_subagent_callback(
         build_runtime_context(messages=[], sender="lead", agent_name="lead")
     )(description)
-
-
-def tool_result_budget(messages: list, max_bytes: int = 200_000) -> list:
-    return tool_result_budget_core(
-        messages,
-        tool_results_dir=TOOL_RESULTS_DIR,
-        max_bytes=max_bytes,
-        persist_threshold=PERSIST_THRESHOLD,
-    )
-
-
-def snip_compact(messages: list, max_messages: int = 50) -> list:
-    return snip_compact_core(messages, max_messages=max_messages)
-
-
-def micro_compact(messages: list) -> list:
-    return micro_compact_core(messages, keep_recent_tool_results=KEEP_RECENT_TOOL_RESULTS)
-
-
-def compact_history(messages: list) -> list:
-    return compact_history_core(
-        messages,
-        transcript_dir=TRANSCRIPT_DIR,
-        client=client,
-        model=MODEL,
-        extract_text=extract_text,
-        printer=print,
-    )
-
-
-def reactive_compact(messages: list) -> list:
-    return reactive_compact_core(
-        messages,
-        transcript_dir=TRANSCRIPT_DIR,
-        client=client,
-        model=MODEL,
-        extract_text=extract_text,
-        printer=print,
-    )
 
 
 threading.Thread(target=CRON_STORE.cron_scheduler_loop, daemon=True).start()

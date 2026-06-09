@@ -14,24 +14,23 @@ def validate(payload):
 
 
 def run(payload, context: ToolContext):
-    del payload
     runtime = context.runtime or {}
-    compact_history = runtime.get("compact_history")
+    manual_compact = runtime.get("manual_compact")
     messages = runtime.get("messages")
-    if not callable(compact_history):
-        return fail("Error: compact_history runtime callback is required")
+    if not callable(manual_compact):
+        return fail("Error: manual_compact runtime callback is required")
     if not isinstance(messages, list):
         return fail("Error: runtime messages list is required")
-    compacted = compact_history(messages)
+    compacted = manual_compact(messages, payload.get("focus"))
     if not compacted:
         return ok("[Compacted]")
-    latest = compacted[-1]
-    return ok(str(latest.get("content", "")))
+    first = compacted[0]
+    return ok(str(first.get("content", "")))
 
 
 TOOL = ToolDefinition(
     name="compact",
-    description="Summarize earlier conversation and continue with compacted context.",
+    description="Request an explicit context compaction for the current session.",
     input_schema={
         "type": "object",
         "properties": {"focus": {"type": "string"}},

@@ -204,6 +204,14 @@ class MainToolPoolAssemblyTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertIs(first["context_manager"], second["context_manager"])
 
+    def test_runtime_context_drops_legacy_compaction_callbacks(self):
+        main_module = load_main_module("mini_claude_main_runtime_no_legacy_compaction")
+
+        runtime = main_module.build_runtime_context(messages=[])
+
+        self.assertNotIn("compact_history", runtime)
+        self.assertNotIn("reactive_compact", runtime)
+
 
 if __name__ == "__main__":
     unittest.main()

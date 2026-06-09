@@ -58,20 +58,21 @@ class SessionToolTests(unittest.TestCase):
         self.assertIn("tool_1.txt", persisted)
         self.assertTrue((root / "tool_1.txt").exists())
 
-    def test_compact_tool_delegates_to_runtime_callback(self):
+    def test_compact_tool_delegates_to_manual_compact_callback(self):
         from tools.compact import TOOL
 
         captured = {}
 
-        def compact_history(messages):
+        def manual_compact(messages, focus=None):
             captured["messages"] = list(messages)
+            captured["focus"] = focus
             return [{"role": "user", "content": "[Compacted]\n\nsummary"}]
 
         context = ToolContext(
             cwd=".",
             runtime={
                 "messages": [{"role": "user", "content": "hello"}],
-                "compact_history": compact_history,
+                "manual_compact": manual_compact,
             },
         )
 
@@ -80,6 +81,7 @@ class SessionToolTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual("[Compacted]\n\nsummary", result.output)
         self.assertEqual([{"role": "user", "content": "hello"}], captured["messages"])
+        self.assertEqual("current task", captured["focus"])
 
 
 if __name__ == "__main__":
