@@ -2,10 +2,11 @@ import ast
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from skills import list_skills, load_skill
-from tooling import ToolContext
+from tooling import BackgroundTaskResult, ToolContext, ToolResult
 from tools.bash import TOOL as BASH_TOOL
 from tools.edit_file import TOOL as EDIT_FILE_TOOL
 from tools.grep_files import TOOL as GREP_FILES_TOOL
@@ -189,6 +190,104 @@ class CoreToolTests(unittest.TestCase):
             ],
             permissions.command_calls,
         )
+
+    def test_run_command_background_checks_permission_before_starting_process(self) -> None:
+        root = fresh_dir("run_command_background_permissions")
+        events: list[str] = []
+
+        class OrderedPermissions(RecordingPermissions):
+            def ensure_command(
+                self,
+                command: str,
+                args: list[str],
+                command_cwd,
+                force_prompt_reason: str | None = None,
+            ) -> bool:
+                events.append("permission")
+                return super().ensure_command(
+                    command,
+                    args,
+                    command_cwd,
+                    force_prompt_reason=force_prompt_reason,
+                )
+
+        permissions = OrderedPermissions()
+        background_task = BackgroundTaskResult(
+            task_id="task_0001",
+            command="python test.py",
+            cwd=str(root.resolve()),
+            pid=4321,
+            status="running",
+            started_at=1710000000,
+        )
+
+        def fake_popen(*args, **kwargs):
+            events.append("popen")
+            return SimpleNamespace(pid=4321)
+
+        with (
+            patch(
+                "tools.run_command.register_background_task",
+                return_value=background_task,
+            ),
+            patch("tools.run_command.subprocess.Popen", side_effect=fake_popen),
+        ):
+            result = RUN_COMMAND_TOOL.run(
+                {"command": "python test.py", "run_in_background": True},
+                ToolContext(cwd=str(root), permissions=permissions),
+            )
+
+        self.assertEqual(["permission", "popen"], events)
+        self.assertTrue(result.ok)
+        self.assertIsNotNone(result.background_task)
+        assert result.background_task is not None
+        self.assertEqual("task_0001", result.background_task.task_id)
+
+    def test_run_command_background_returns_started_message(self) -> None:
+        root = fresh_dir("run_command_background_message")
+        background_task = BackgroundTaskResult(
+            task_id="task_0001",
+            command="python test.py",
+            cwd=str(root.resolve()),
+            pid=4321,
+            status="running",
+            started_at=1710000000,
+        )
+
+        with (
+            patch(
+                "tools.run_command.register_background_task",
+                return_value=background_task,
+            ),
+            patch(
+                "tools.run_command.subprocess.Popen",
+                return_value=SimpleNamespace(pid=4321),
+            ),
+        ):
+            result = RUN_COMMAND_TOOL.run(
+                {"command": "python test.py", "run_in_background": True},
+                ToolContext(cwd=str(root)),
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            "Background command started.\nTASK: task_0001\nPID: 4321",
+            result.output,
+        )
+
+    def test_bash_alias_preserves_run_in_background(self) -> None:
+        root = fresh_dir("bash_alias_background")
+
+        with patch.object(
+            RUN_COMMAND_TOOL, "run", return_value=ToolResult(ok=True, output="started")
+        ) as run_mock:
+            result = BASH_TOOL.run(
+                {"command": "python test.py", "run_in_background": True},
+                ToolContext(cwd=str(root)),
+            )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(run_mock.call_args.args[0]["run_in_background"])
 
     def test_list_files_lists_entries_in_directory(self) -> None:
         root = fresh_dir("list_files")

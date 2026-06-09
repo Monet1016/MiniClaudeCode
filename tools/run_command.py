@@ -3,7 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from tooling import ToolContext, ToolDefinition
+from background_tasks import register_background_task
+from tooling import ToolContext, ToolDefinition, ToolResult
 from tools.common import fail, ok, resolve_path
 
 
@@ -27,11 +28,16 @@ def validate(payload):
     if not isinstance(timeout, int):
         raise TypeError("timeout must be an integer")
 
+    run_in_background = payload.get("run_in_background", False)
+    if not isinstance(run_in_background, bool):
+        raise TypeError("run_in_background must be a boolean")
+
     return {
         "command": command.strip(),
         "args": [str(arg) for arg in args],
         "cwd": cwd,
         "timeout": max(1, min(timeout, 600)),
+        "run_in_background": run_in_background,
     }
 
 
@@ -41,6 +47,7 @@ def run(payload, context: ToolContext):
         "args": payload.get("args", []),
         "cwd": payload.get("cwd"),
         "timeout": payload.get("timeout", 120),
+        "run_in_background": payload.get("run_in_background", False),
     }
     workspace_root = Path(context.cwd).resolve()
     effective_cwd = (
@@ -62,7 +69,47 @@ def run(payload, context: ToolContext):
             force_prompt_reason=force_prompt_reason,
         )
 
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
     try:
+        if payload["run_in_background"]:
+            if payload["args"]:
+                process = subprocess.Popen(
+                    [payload["command"], *payload["args"]],
+                    cwd=effective_cwd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    text=True,
+                    creationflags=creationflags,
+                )
+                task_command = " ".join([payload["command"], *payload["args"]])
+            else:
+                process = subprocess.Popen(
+                    payload["command"],
+                    cwd=effective_cwd,
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    text=True,
+                    creationflags=creationflags,
+                )
+                task_command = payload["command"]
+            background_task = register_background_task(
+                task_command,
+                str(effective_cwd),
+                process.pid,
+            )
+            return ToolResult(
+                ok=True,
+                output=(
+                    "Background command started.\n"
+                    f"TASK: {background_task.task_id}\n"
+                    f"PID: {process.pid}"
+                ),
+                background_task=background_task,
+            )
         if payload["args"]:
             completed = subprocess.run(
                 [payload["command"], *payload["args"]],
@@ -108,6 +155,7 @@ TOOL = ToolDefinition(
             "args": {"type": "array", "items": {"type": "string"}},
             "cwd": {"type": "string"},
             "timeout": {"type": "integer"},
+            "run_in_background": {"type": "boolean"},
         },
         "required": ["command"],
     },

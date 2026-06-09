@@ -1,6 +1,12 @@
 import unittest
 
-from tooling import ToolContext, ToolDefinition, ToolRegistry, ToolResult
+from tooling import (
+    BackgroundTaskResult,
+    ToolContext,
+    ToolDefinition,
+    ToolRegistry,
+    ToolResult,
+)
 
 
 class PermissionLike:
@@ -191,6 +197,40 @@ class ToolingTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(result.output.startswith("Error running sample:"))
         self.assertIn("ToolResult", result.output)
+
+    def test_execute_preserves_background_task_metadata(self) -> None:
+        background_task = BackgroundTaskResult(
+            task_id="task_0001",
+            command="python test.py",
+            cwd="D:/workspace",
+            pid=4321,
+            status="running",
+            started_at=1710000000,
+        )
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="sample",
+                    description="sample tool",
+                    input_schema={},
+                    validator=lambda data: data,
+                    run=lambda parsed, context: ToolResult(
+                        ok=True,
+                        output="started",
+                        background_task=background_task,
+                    ),
+                )
+            ]
+        )
+
+        result = registry.execute("sample", {}, ToolContext(cwd="."))
+
+        self.assertTrue(result.ok)
+        self.assertEqual("started", result.output)
+        self.assertIsNotNone(result.background_task)
+        assert result.background_task is not None
+        self.assertEqual("task_0001", result.background_task.task_id)
+        self.assertEqual(4321, result.background_task.pid)
 
 
 if __name__ == "__main__":

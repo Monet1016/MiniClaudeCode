@@ -5,9 +5,20 @@ from typing import Any, Callable
 
 
 @dataclass(slots=True)
+class BackgroundTaskResult:
+    task_id: str
+    command: str
+    cwd: str
+    pid: int | None
+    status: str
+    started_at: int
+
+
+@dataclass(slots=True)
 class ToolResult:
     ok: bool
     output: str
+    background_task: BackgroundTaskResult | None = None
 
 
 @dataclass(slots=True)
@@ -63,20 +74,28 @@ class ToolRegistry:
         return f"{text[:cls.OUTPUT_CHAR_LIMIT]}\n...[truncated {omitted} chars]"
 
     @classmethod
-    def _finalize_result(cls, ok: bool, output: Any) -> ToolResult:
-        return ToolResult(ok=ok, output=cls._normalize_output(output))
+    def _finalize_result(cls, result: ToolResult) -> ToolResult:
+        return ToolResult(
+            ok=result.ok,
+            output=cls._normalize_output(result.output),
+            background_task=result.background_task,
+        )
 
     def execute(self, tool_name: str, input_data: Any, context: ToolContext) -> ToolResult:
         tool = self.find(tool_name)
         if tool is None:
-            return self._finalize_result(ok=False, output=f"Unknown tool: {tool_name}")
+            return self._finalize_result(
+                ToolResult(ok=False, output=f"Unknown tool: {tool_name}")
+            )
 
         try:
             parsed = tool.validator(input_data)
         except Exception as error:  # noqa: BLE001
             return self._finalize_result(
-                ok=False,
-                output=f"Validation error in {tool_name}: {error}",
+                ToolResult(
+                    ok=False,
+                    output=f"Validation error in {tool_name}: {error}",
+                )
             )
 
         try:
@@ -85,11 +104,13 @@ class ToolRegistry:
                 raise TypeError(
                     f"Tool {tool_name} must return ToolResult, got {type(result).__name__}"
                 )
-            result = self._finalize_result(ok=result.ok, output=result.output)
+            result = self._finalize_result(result)
         except Exception as error:  # noqa: BLE001
             return self._finalize_result(
-                ok=False,
-                output=f"Error running {tool_name}: {error}",
+                ToolResult(
+                    ok=False,
+                    output=f"Error running {tool_name}: {error}",
+                )
             )
 
         return result

@@ -6,6 +6,7 @@ import threading
 import time
 from typing import Any, Callable
 
+from background_tasks import collect_background_notifications
 from tooling import ToolContext
 
 DEFAULT_MAX_TOKENS = 8000
@@ -51,11 +52,6 @@ class RecoveryState:
 
 rounds_since_todo = 0
 agent_lock = threading.Lock()
-
-_bg_counter = 0
-background_tasks: dict[str, dict] = {}
-background_results: dict[str, str] = {}
-background_lock = threading.Lock()
 
 
 def _block_value(block: Any, field: str, default: Any = None) -> Any:
@@ -127,87 +123,6 @@ def is_prompt_too_long_error(exc: Exception) -> bool:
     )
 
 
-def is_slow_operation(tool_name: str, tool_input: dict) -> bool:
-    if tool_name != "bash":
-        return False
-    command = str(tool_input.get("command", "")).lower()
-    slow_keywords = [
-        "install",
-        "build",
-        "test",
-        "deploy",
-        "compile",
-        "docker build",
-        "pip install",
-        "npm install",
-        "cargo build",
-        "pytest",
-        "make",
-    ]
-    return any(keyword in command for keyword in slow_keywords)
-
-
-def should_run_background(tool_name: str, tool_input: dict) -> bool:
-    if tool_name != "bash":
-        return False
-    return bool(tool_input.get("run_in_background")) or is_slow_operation(
-        tool_name,
-        tool_input,
-    )
-
-
-def start_background_task(block: Any, registry: Any, deps: AgentLoopDeps) -> str:
-    global _bg_counter
-    _bg_counter += 1
-    bg_id = f"bg_{_bg_counter:04d}"
-    command = _block_value(block, "input", {}).get("command", _block_value(block, "name"))
-
-    def worker() -> None:
-        result = registry.execute(
-            _block_value(block, "name"),
-            _block_value(block, "input", {}),
-            _tool_context(deps),
-        )
-        deps.trigger_hooks("PostToolUse", block, result)
-        with background_lock:
-            background_tasks[bg_id]["status"] = "completed"
-            background_results[bg_id] = str(result.output)
-
-    with background_lock:
-        background_tasks[bg_id] = {
-            "tool_use_id": _block_value(block, "id"),
-            "command": command,
-            "status": "running",
-        }
-    threading.Thread(target=worker, daemon=True).start()
-    deps.terminal_print(f"  \033[33m[background] {bg_id}: {str(command)[:60]}\033[0m")
-    return bg_id
-
-
-def collect_background_results() -> list[str]:
-    with background_lock:
-        ready = [
-            bg_id
-            for bg_id, task in background_tasks.items()
-            if task["status"] == "completed"
-        ]
-    notifications = []
-    for bg_id in ready:
-        with background_lock:
-            task = background_tasks.pop(bg_id)
-            output = background_results.pop(bg_id, "")
-        summary = output[:200] if len(output) > 200 else output
-        notifications.append(
-            f"<task_notification>\n"
-            f"  <task_id>{bg_id}</task_id>\n"
-            f"  <status>completed</status>\n"
-            f"  <command>{task['command']}</command>\n"
-            f"  <summary>{summary}</summary>\n"
-            f"</task_notification>"
-        )
-    return notifications
-
-
 def prepare_context(messages: list, deps: AgentLoopDeps) -> list:
     messages[:] = deps.tool_result_budget(messages)
     messages[:] = deps.snip_compact(messages)
@@ -222,7 +137,7 @@ def build_user_content(results: list[dict]) -> list[dict]:
 
 
 def inject_background_notifications(messages: list) -> None:
-    notes = collect_background_results()
+    notes = collect_background_notifications()
     if notes:
         messages.append(
             {
@@ -363,24 +278,6 @@ def agent_loop(messages: list, context: dict, deps: AgentLoopDeps) -> None:
                     )
                     continue
 
-                if should_run_background(
-                    _block_value(block, "name"),
-                    _block_value(block, "input", {}),
-                ):
-                    bg_id = start_background_task(block, registry, deps)
-                    output = (
-                        f"[Background task {bg_id} started] "
-                        "Result will arrive as a task_notification."
-                    )
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": _block_value(block, "id"),
-                            "content": output,
-                        }
-                    )
-                    continue
-
                 tool_result = registry.execute(
                     _block_value(block, "name"),
                     _block_value(block, "input", {}),
@@ -388,7 +285,13 @@ def agent_loop(messages: list, context: dict, deps: AgentLoopDeps) -> None:
                 )
                 output = tool_result.output
                 deps.trigger_hooks("PostToolUse", block, tool_result)
-                deps.terminal_print(str(output)[:300])
+                if tool_result.background_task is not None:
+                    task = tool_result.background_task
+                    deps.terminal_print(
+                        f"  \033[33m[background] {task.task_id}: {task.command[:60]}\033[0m"
+                    )
+                else:
+                    deps.terminal_print(str(output)[:300])
 
                 if _block_value(block, "name") == "todo_write":
                     rounds_since_todo = 0
